@@ -5,6 +5,11 @@ import brain_twin_db as db
 import plotly.graph_objects as go
 from auth_ui import render_auth, clear_assessment_state
 from google import genai
+from assessment_logic import (
+    category_summary as build_category_summary,
+    next_difficulty,
+    processing_speed_score,
+)
 
 # =========================================================
 # 1. PAGE CONFIGURATION AND DESIGN
@@ -751,6 +756,88 @@ categories = [
     "Verbal Reasoning",
 ]
 
+
+def build_fallback_report(
+    category_summary,
+    cognitive_index,
+    correct_count,
+    total_questions,
+    average_seconds,
+    previous_attempts,
+):
+    """Build a rule-based coaching report when Gemini is unavailable."""
+    ranked = sorted(
+        (
+            category,
+            details.get("score", 0),
+        )
+        for category, details in category_summary.items()
+        if details.get("total", 0) > 0
+    )
+
+    if ranked:
+        strongest_category, strongest_score = max(
+            ranked,
+            key=lambda item: item[1],
+        )
+        weakest_category, weakest_score = min(
+            ranked,
+            key=lambda item: item[1],
+        )
+    else:
+        strongest_category, strongest_score = "No category", 0
+        weakest_category, weakest_score = "No category", 0
+
+    exercise_suggestions = {
+        "Logic & Patterns": "Solve one short sequencing or rule-checking puzzle.",
+        "Numerical Reasoning": "Work through five estimation or number-pattern problems.",
+        "Spatial Reasoning": "Rotate or compare five simple shapes before checking answers.",
+        "Working Memory": "Recall a short list after a one-minute distraction.",
+        "Processing Speed": "Complete a timed set of easy comparisons while keeping accuracy steady.",
+        "Verbal Reasoning": "Summarize a short argument and identify its conclusion.",
+    }
+
+    weak_categories = [
+        category
+        for category, score in sorted(ranked, key=lambda item: item[1])[:3]
+    ]
+    exercises = "\n".join(
+        f"- {category}: {exercise_suggestions.get(category, 'Practice a short set of related questions.')}"
+        for category in weak_categories
+    )
+
+    if previous_attempts:
+        previous_score = previous_attempts[-1].get("cognitive_index", 0)
+        progress = (
+            f"The previous recorded Cognitive Index was {previous_score}/100; "
+            f"the current result is {cognitive_index}/100."
+        )
+    else:
+        progress = "This is the baseline; future assessments can help track change."
+
+    return f"""## 1. Overall performance
+You answered {correct_count} of {total_questions} questions correctly, for a Cognitive Index of {cognitive_index}/100. Average response time was {average_seconds:.1f} seconds. This experimental profile is not standardized.
+
+## 2. Cognitive strengths
+Your highest current category was {strongest_category} at {strongest_score}%.
+
+## 3. Areas to practise
+The category with the most room for practice was {weakest_category} at {weakest_score}%. This is a practice opportunity, not a permanent label.
+
+## 4. Progress over time
+{progress} A score change does not by itself establish lasting improvement.
+
+## 5. Three targeted exercises
+{exercises or '- Complete a short mixed practice set covering three categories.'}
+
+## 6. Next practice plan
+Choose one exercise above and complete one focused 10-minute session, keeping accuracy and response time in view.
+
+## 7. Motivational closing
+Use this snapshot as a guide for your next practice session. Small, consistent repetitions can make your progress easier to observe.
+
+*Report generated without AI (service unavailable).*"""
+
 defaults = {
     "current_index": 0,
     "answers": {},
@@ -789,6 +876,7 @@ st.write(
     "numbers, spatial reasoning, memory, speed, and language."
 )
 st.caption("Prototype assessment · Not a clinically validated IQ test")
+st.caption("No biometric data (camera, voice, or face) is collected.")
 st.divider()
 
 
@@ -990,18 +1078,9 @@ if current_index < total_questions:
                 if is_correct:
                     stats["correct"] += 1
 
-                levels = ["Moderate", "Difficult", "Challenging"]
-                level_index = levels.index(
-                    st.session_state.skill_difficulty[category]
-                )
-
-                if is_correct:
-                    level_index = min(level_index + 1, 2)
-                else:
-                    level_index = max(level_index - 1, 0)
-
-                st.session_state.skill_difficulty[category] = (
-                    levels[level_index]
+                st.session_state.skill_difficulty[category] = next_difficulty(
+                    st.session_state.skill_difficulty[category],
+                    is_correct,
                 )
 
                 st.session_state.current_index += 1
@@ -1050,44 +1129,49 @@ else:
     st.divider()
     st.markdown("### 📊 Performance by category")
 
-    category_summary = {}
+    category_summary = build_category_summary(answers, categories)
+
+    processing_speed = category_summary["Processing Speed"]
+    if processing_speed["total"]:
+        processing_speed["accuracy_score"] = processing_speed["score"]
+        processing_speed["score"] = processing_speed_score(
+            processing_speed["correct"],
+            processing_speed["total"],
+            processing_speed["average_seconds"],
+        )
 
     for category in categories:
-        category_answers = [
-            a for a in answers if a["category"] == category
-        ]
+        details = category_summary[category]
+        category_correct = details["correct"]
+        category_total = details["total"]
+        category_score = details["score"]
+        interval_low = details["interval_low"]
+        interval_high = details["interval_high"]
 
-        category_correct = sum(
-            a["is_correct"] for a in category_answers
-        )
-
-        category_total = len(category_answers)
-
-        category_score = (
-            round(100 * category_correct / category_total)
-            if category_total else 0
-        )
-
-        category_time = (
-            sum(a["seconds"] for a in category_answers) / category_total
-            if category_total else 0
-        )
-
-        category_summary[category] = {
-            "correct": category_correct,
-            "total": category_total,
-            "score": category_score,
-            "average_seconds": round(category_time, 2),
-        }
+        if category == "Processing Speed" and category_total:
+            score_label = (
+                f"{category_score}% combined score "
+                "(70% accuracy + 30% rapidness)"
+            )
+        else:
+            score_label = f"{category_score}%"
 
         st.write(
             f"**{category}** — {category_correct}/{category_total} "
-            f"correct ({category_score}%)"
+            f"correct ({score_label} | 95% CI: "
+            f"{interval_low}-{interval_high}%)"
         )
         st.progress(category_score / 100)
+
+    category_time = (
+        sum(answer["seconds"] for answer in answers) / len(answers)
+        if answers else 0
+    )
         
     st.caption(
-        f"Average response time: {category_time:.1f} seconds per question"
+        f"Average response time: {category_time:.1f} seconds per question. "
+        "With few questions per category, uncertainty is high; this "
+        "profile is not a standardized measure."
     )
 
     st.divider()
@@ -1106,10 +1190,20 @@ else:
     if profile_data:
         labels = list(profile_data.keys())
         scores = list(profile_data.values())
+        interval_lows = [
+            category_summary[category].get("interval_low", 0)
+            for category in labels
+        ]
+        interval_highs = [
+            category_summary[category].get("interval_high", 100)
+            for category in labels
+        ]
 
         # Close the radar shape by repeating the first dimension.
         radar_labels = labels + [labels[0]]
         radar_scores = scores + [scores[0]]
+        radar_lows = interval_lows + [interval_lows[0]]
+        radar_highs = interval_highs + [interval_highs[0]]
 
         fig = go.Figure()
 
@@ -1134,11 +1228,39 @@ else:
             )
         )
 
+        fig.add_trace(
+            go.Scatterpolar(
+                r=radar_lows,
+                theta=radar_labels,
+                name="95% CI lower bound",
+                line=dict(color="#38BDF8", width=1, dash="dot"),
+                hovertemplate=(
+                    "<b>%{theta}</b><br>"
+                    "Lower bound: %{r}%"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        fig.add_trace(
+            go.Scatterpolar(
+                r=radar_highs,
+                theta=radar_labels,
+                name="95% CI upper bound",
+                line=dict(color="#FBBF24", width=1, dash="dot"),
+                hovertemplate=(
+                    "<b>%{theta}</b><br>"
+                    "Upper bound: %{r}%"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            showlegend=False,
+            showlegend=True,
             height=480,
             margin=dict(l=55, r=55, t=35, b=35),
             polar=dict(
@@ -1264,9 +1386,16 @@ else:
             except Exception:
                 history = []
 
-            # The latest saved record is usually this assessment,
-            # because results are saved before the coaching section.
-            previous_attempts = history[:-1] if history else []
+            current_run_id = st.session_state.get(
+                "assessment_saved_run_id"
+            )
+            if current_run_id:
+                previous_attempts = [
+                    attempt for attempt in history
+                    if attempt.get("run_id") != current_run_id
+                ]
+            else:
+                previous_attempts = history
 
             history_lines = []
 
@@ -1408,9 +1537,15 @@ RULES
                         )
 
             except Exception as error:
-                st.session_state.ai_report_error = (
-                    f"{type(error).__name__}: {error}"
+                st.session_state.ai_report = build_fallback_report(
+                    category_summary=category_summary,
+                    cognitive_index=cognitive_index,
+                    correct_count=correct_count,
+                    total_questions=total_questions,
+                    average_seconds=average_seconds,
+                    previous_attempts=previous_attempts,
                 )
+                st.session_state.ai_report_error = None
 
             st.rerun()
 

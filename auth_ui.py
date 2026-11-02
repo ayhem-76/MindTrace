@@ -104,6 +104,12 @@ def render_auth():
                 "Confirm password",
                 type="password"
             )
+            consent_given = st.checkbox(
+                "I consent to storing my scores, response times, and "
+                "assessment history to personalize practice. Only scores "
+                "and errors, never my name or password, are sent to Gemini. "
+                "I can delete my account and data at any time."
+            )
 
             register_submitted = st.form_submit_button(
                 "Create account",
@@ -122,6 +128,8 @@ def render_auth():
                 st.warning("Use a password with at least 12 characters.")
             elif new_password != confirm_password:
                 st.error("The passwords do not match.")
+            elif not consent_given:
+                st.warning("Consent is required to create an account.")
             else:
                 try:
                     db.create_user(username, new_password)

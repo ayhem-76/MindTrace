@@ -1,6 +1,9 @@
 
+import json
+
 import streamlit as st
 import brain_twin_db as db
+import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="MindTrace | Brain Twin",
@@ -33,6 +36,33 @@ try:
 except Exception:
     st.error("Could not load your assessment history.")
     st.stop()
+
+st.divider()
+st.subheader("🔐 My data")
+st.download_button(
+    "Export my history (JSON)",
+    data=json.dumps(history, indent=2),
+    file_name="mindtrace_history.json",
+    mime="application/json",
+    use_container_width=True,
+)
+
+confirm_delete = st.checkbox(
+    "I understand that deleting my account permanently removes my "
+    "account and assessment history."
+)
+
+if st.button(
+    "Delete my account and data",
+    disabled=not confirm_delete,
+    use_container_width=True,
+):
+    try:
+        db.delete_user(user_id)
+        st.session_state.clear()
+        st.rerun()
+    except Exception:
+        st.error("Your account could not be deleted. Please try again.")
 
 if not history:
     st.subheader("Your journey starts here")
@@ -97,6 +127,68 @@ else:
 
 st.divider()
 
+# Category scores across all recorded attempts.
+st.subheader("🗺️ Category performance over time")
+
+category_order = []
+
+for attempt in history:
+    for category in attempt.get("category_scores", {}):
+        if category not in category_order:
+            category_order.append(category)
+
+if category_order:
+    heatmap_values = []
+
+    for category in category_order:
+        row = []
+
+        for attempt in history:
+            raw_score = attempt.get("category_scores", {}).get(category)
+
+            if isinstance(raw_score, dict):
+                row.append(raw_score.get("score"))
+            elif isinstance(raw_score, (int, float)):
+                row.append(raw_score)
+            else:
+                row.append(None)
+
+        heatmap_values.append(row)
+
+    heatmap = go.Figure(
+        data=go.Heatmap(
+            z=heatmap_values,
+            x=[f"Attempt {number}" for number in range(1, len(history) + 1)],
+            y=category_order,
+            zmin=0,
+            zmax=100,
+            colorscale="Viridis",
+            colorbar=dict(title="Score (%)"),
+            hovertemplate=(
+                "<b>%{y}</b><br>%{x}<br>Score: %{z}%"
+                "<extra></extra>"
+            ),
+        )
+    )
+    heatmap.update_layout(
+        title="Category scores by assessment",
+        height=max(300, 55 * len(category_order) + 120),
+        margin=dict(l=20, r=20, t=60, b=20),
+    )
+    st.plotly_chart(
+        heatmap,
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+    st.caption(
+        "Blank cells indicate that a category was not recorded in that "
+        "assessment."
+    )
+else:
+    st.info("No category scores are available for the heatmap.")
+
+st.divider()
+
 # Most recent category profile.
 st.subheader("🎯 Latest cognitive profile")
 
@@ -104,16 +196,25 @@ category_scores = latest.get("category_scores", {})
 
 if category_scores:
     score_data = {
-        category: details.get("score", 0)
+        category: (
+            details.get("score", 0)
+            if isinstance(details, dict)
+            else details
+        )
         for category, details in category_scores.items()
     }
 
     st.bar_chart(score_data, height=300)
 
     for category, details in category_scores.items():
-        score = details.get("score", 0)
-        correct = details.get("correct", 0)
-        total = details.get("total", 0)
+        if isinstance(details, dict):
+            score = details.get("score", 0)
+            correct = details.get("correct", 0)
+            total = details.get("total", 0)
+        else:
+            score = details
+            correct = "-"
+            total = "-"
 
         st.write(f"**{category}** — {score}% ({correct}/{total})")
 else:

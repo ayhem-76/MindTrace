@@ -119,9 +119,10 @@ def save_assessment(
     total_questions,
     average_seconds,
     category_scores,
+    completed_at=None,
 ):
     run_id = str(uuid.uuid4())
-    completed_at = datetime.now(timezone.utc).isoformat()
+    completed_at = completed_at or datetime.now(timezone.utc).isoformat()
 
     with get_connection() as connection:
         connection.execute(
