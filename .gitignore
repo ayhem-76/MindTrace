@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# API keys and secrets
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Local databases and user data
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor files
+.vscode/
